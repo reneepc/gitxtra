@@ -5,7 +5,18 @@ source "$SCRIPT_DIR/git-utils"
 
 check_git_repo
 
-stale_cutoff=$(get_stale_cutoff)
+get_stale_cutoff() {
+    echo -e "${YELLOW}Enter the number of weeks to consider branches as stale:${NO_COLOR}"
+    read -r weeks
+    if ! [[ "$weeks" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}Error: Please enter a valid number of weeks.${NO_COLOR}"
+        exit 1
+    fi
+    stale_cutoff=$(date -v-"$weeks"w +%s)  # Store directly into the global variable
+}
+
+get_stale_cutoff  # Correct function call, no subshell
+
 echo -e "${GREEN}Finding branches older than $weeks weeks...${NO_COLOR}"
 
 get_stale_branches

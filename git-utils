@@ -1,10 +1,15 @@
 #!/bin/bash
 
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+UNDERLINE='\033[4m'
 NO_COLOR='\033[0m'
 
+# Ensure inside a Git repository
 check_git_repo() {
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
         echo -e "${RED}Error: This is not a Git repository.${NO_COLOR}"
@@ -12,16 +17,17 @@ check_git_repo() {
     fi
 }
 
-get_stale_cutoff() {
-    echo -e "${YELLOW}Enter the number of weeks to consider branches as stale:${NO_COLOR}"
-    read -r weeks
-    if ! [[ "$weeks" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}Error: Please enter a valid number of weeks.${NO_COLOR}"
-        exit 1
-    fi
-    date -v-"$weeks"w +%s
+# Get the main branch
+get_main_branch() {
+    git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo "main"
 }
 
+# Get the current branch
+get_current_branch() {
+    git branch --show-current
+}
+
+# Get stale branches given a specific cutoff time
 get_stale_branches() {
     stale_branches=()
     for branchdata in $(git for-each-ref --format="%(refname:short)@%(committerdate:unix)" refs/heads/); do
