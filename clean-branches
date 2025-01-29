@@ -1,0 +1,43 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/git-utils"
+
+check_git_repo
+
+stale_cutoff=$(get_stale_cutoff)
+echo -e "${GREEN}Finding branches older than $weeks weeks...${NO_COLOR}"
+
+get_stale_branches
+
+if [ ${#stale_branches[@]} -eq 0 ]; then
+    echo -e "${GREEN}No stale branches found.${NO_COLOR}"
+    exit 0
+fi
+
+echo -e "${YELLOW}The following branches are stale and will be deleted:${NO_COLOR}"
+for branch in "${stale_branches[@]}"; do
+    echo -e "${RED} $branch ${NO_COLOR}"
+done
+
+echo -e "${YELLOW}Are you sure you want to delete these branches? (y/N)${NO_COLOR}"
+read -r confirm
+if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+    echo -e "${GREEN}Aborted.${NO_COLOR}"
+    exit 0
+fi
+
+for branch in "${stale_branches[@]}"; do
+    git branch -D "$branch"
+done
+
+echo -e "${YELLOW}Do you want to delete remote branches as well? (y/N)${NO_COLOR}"
+read -r confirm_remote
+if [[ "$confirm_remote" == "y" || "$confirm_remote" == "Y" ]]; then
+    for branch in "${stale_branches[@]}"; do
+        git push origin --delete "$branch" 2>/dev/null
+    done
+    echo -e "${GREEN}Remote branches deleted.${NO_COLOR}"
+fi
+
+echo -e "${GREEN}Stale branches removed successfully!${NO_COLOR}"
