@@ -5,21 +5,59 @@ source "$SCRIPT_DIR/git-utils"
 
 check_git_repo
 
-get_stale_cutoff() {
-    echo -e "${YELLOW}Enter the number of weeks to consider branches as stale:${NO_COLOR}"
-    read -r weeks
-    if ! [[ "$weeks" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}Error: Please enter a valid number of weeks.${NO_COLOR}"
-        exit 1
-    fi
-    stale_cutoff=$(date -v-"$weeks"w +%s)  # Store directly into the global variable
+printf "${YELLOW}Enter the time period to consider branches as stale (e.g., 30 minutes, 2 hours, 5 days, 3 weeks, 1 year):${NO_COLOR} "
+read -r time_input
+
+if [[ -z "$time_input" ]]; then
+    echo -e "${RED}Error: Time input cannot be empty.${NO_COLOR}"
+    exit 1
+fi
+
+echo -e "${GREEN}Finding branches older than \"$time_input\"...${NO_COLOR}"
+
+convert_to_timestamp() {
+    local input="$1"
+    local number="${input//[^0-9]/}"
+    local unit="${input//[0-9 ]/}"
+
+    case "$unit" in
+        m|min|minutes) date -v-"${number}"M +%s ;;
+        h|hour|hours) date -v-"${number}"H +%s ;;
+        d|day|days) date -v-"${number}"d +%s ;;
+        w|week|weeks) date -v-"${number}"w +%s ;;
+        M|month|months) date -v-"${number}"m +%s ;;
+        y|year|years) date -v-"${number}"y +%s ;;
+        *) echo -e "${RED}Error: Invalid time format.${NO_COLOR}"; exit 1 ;;
+    esac
 }
 
-get_stale_cutoff  # Correct function call, no subshell
+stale_cutoff=$(convert_to_timestamp "$time_input") || {
+    echo -e "\n${RED}Error: Invalid time format.${NO_COLOR}"
+    echo -e "${YELLOW}Valid formats:${NO_COLOR}"
+    echo "--------------------------------"
+    echo "| Format   | Example Input      |"
+    echo "--------------------------------"
+    echo "| Minutes  | 30 min, 10 minutes |"
+    echo "| Hours    | 2 h, 5 hours       |"
+    echo "| Days     | 1 d, 3 days        |"
+    echo "| Weeks    | 2 w, 4 weeks       |"
+    echo "| Months   | 1 mo, 6 months     |"
+    echo "| Years    | 1 y, 2 years       |"
+    echo "--------------------------------"
+    exit 1
+}
 
-echo -e "${GREEN}Finding branches older than $weeks weeks...${NO_COLOR}"
+branches=($(git for-each-ref --format="%(refname:short)@%(committerdate:unix)" refs/heads/))
 
-get_stale_branches
+stale_branches=()
+for branchdata in "${branches[@]}"; do
+    branch=$(echo "$branchdata" | cut -d '@' -f1)
+    last_commit_time=$(echo "$branchdata" | cut -d '@' -f2)
+
+    if [[ "$last_commit_time" -lt "$stale_cutoff" ]]; then
+        stale_branches+=("$branch")
+    fi
+done
 
 if [ ${#stale_branches[@]} -eq 0 ]; then
     echo -e "${GREEN}No stale branches found.${NO_COLOR}"
@@ -31,7 +69,7 @@ for branch in "${stale_branches[@]}"; do
     echo -e "${RED} $branch ${NO_COLOR}"
 done
 
-echo -e "${YELLOW}Are you sure you want to delete these branches? (y/N)${NO_COLOR}"
+printf "${YELLOW}Are you sure you want to delete these branches? (y/N)${NO_COLOR} "
 read -r confirm
 if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     echo -e "${GREEN}Aborted.${NO_COLOR}"
@@ -42,7 +80,7 @@ for branch in "${stale_branches[@]}"; do
     git branch -D "$branch"
 done
 
-echo -e "${YELLOW}Do you want to delete remote branches as well? (y/N)${NO_COLOR}"
+printf "${YELLOW}Do you want to delete remote branches as well? (y/N)${NO_COLOR} "
 read -r confirm_remote
 if [[ "$confirm_remote" == "y" || "$confirm_remote" == "Y" ]]; then
     for branch in "${stale_branches[@]}"; do
