@@ -1,4 +1,5 @@
 #!/bin/bash
+## Inspired by: https://gist.github.com/schacon/e9e743dee2e92db9a464619b99e94eff
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/git-utils"
