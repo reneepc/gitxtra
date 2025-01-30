@@ -19,7 +19,7 @@ print_branch_info() {
     local is_current="$5"
 
     if [[ "$is_current" == "true" ]]; then
-        printf "${BOLD}${UNDERLINE}${GREEN}%-5s ${RED}%-6s ${BLUE}%-30s ${YELLOW}%-20s${NO_COLOR}\n" "$ahead" "$behind" "$branch" "$time"
+        printf "${BOLD}${UNDERLINE}${GREEN}%-5s ${RED}%-6s ${BOLD_GREEN}%-30s ${YELLOW}%-20s${NO_COLOR}\n" "$ahead" "$behind" "$branch" "$time"
     else
         printf "${GREEN}%-5s ${RED}%-6s ${BLUE}%-30s ${YELLOW}%-20s${NO_COLOR}\n" "$ahead" "$behind" "$branch" "$time"
     fi
