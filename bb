@@ -36,14 +36,12 @@ for branchdata in $(git for-each-ref --sort=-authordate --format="$format_string
     branch=$(echo "$branchdata" | cut -d '@' -f2)
     time=$(echo "$branchdata" | cut -d '@' -f3)
 
-    if [[ "$branch" != "$main_branch" ]]; then
-        ahead_behind=$(git rev-list --left-right --count "$main_branch"..."$branch" 2>/dev/null)
-        ahead=$(echo "$ahead_behind" | awk '{print $2}')
-        behind=$(echo "$ahead_behind" | awk '{print $1}')
-        is_current="false"
-        [[ "$branch" == "$current_branch" ]] && is_current="true"
+    ahead_behind=$(git rev-list --left-right --count "$main_branch"..."$branch" 2>/dev/null)
+    ahead=$(echo "$ahead_behind" | awk '{print $2}')
+    behind=$(echo "$ahead_behind" | awk '{print $1}')
+    is_current="false"
+    [[ "$branch" == "$current_branch" ]] && is_current="true"
 
-        print_branch_info "$ahead" "$behind" "$branch" "$time" "$is_current"
-    fi
+    print_branch_info "$ahead" "$behind" "$branch" "$time" "$is_current"
 done
 
