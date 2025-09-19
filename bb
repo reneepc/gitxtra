@@ -56,7 +56,6 @@ print_row() {
 }
 
 supports_nul_delim() {
-  # Older Git may not support -z for for-each-ref; if so, fall back.
   git for-each-ref -z --format="%(refname)" refs/heads/ >/dev/null 2>&1
 }
 
