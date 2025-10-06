@@ -1,0 +1,339 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/git-utils"
+
+usage() {
+  cat <<'USAGE'
+Usage: git copy-files [--output FILE | --print] [--filter (+|-)ext1,ext2,...]
+                     [--include-hidden] [--include-binary]
+                     [--include-path PATTERN] [--exclude-path PATTERN]
+                     [--match-content STRING] [--no-default-excludes]
+                     [--help]
+
+Copies the contents of tracked files into one concatenated stream. Each file is
+preceded by a header line containing its repository-relative path. Hidden files,
+common binary formats, and Gradle wrapper assets are skipped unless explicitly
+included.
+
+  --output FILE      Write the result to FILE instead of the clipboard
+  --print            Print the result to stdout (skips pbcopy)
+  --filter VALUE     Include or exclude extensions. Prefix VALUE with + to
+                     include only those extensions or - to exclude them.
+                     Example: --filter +sh,md  or  --filter -.log,.tmp
+  --include-hidden   Include dotfiles and files inside dot-directories
+  --include-binary   Include common binary extensions (png, pdf, zip, etc.)
+  --include-path P   Include only files whose path matches glob pattern P
+  --exclude-path P   Skip files whose path matches glob pattern P
+  --match-content S  Include only files whose content contains string S
+  --no-default-excludes
+                     Ignore the built-in skip list (gradle files, wrapper, etc.)
+  -h, --help         Show this help message
+
+If neither --output nor --print is provided, the script sends the result to
+pbcopy. When pbcopy is unavailable the script falls back to stdout.
+USAGE
+}
+
+FILTER_MODE=""
+FILTER_EXTS=()
+OUTPUT_MODE="clipboard"
+OUTPUT_FILE=""
+TMP_FILE=""
+INCLUDE_HIDDEN=false
+INCLUDE_BINARY=false
+DEFAULT_BINARY_EXTS="bin exe dll so dylib a class o pdf png jpg jpeg gif bmp webp ico icns psd ai eps ttf otf woff woff2 eot mp3 wav flac ogg m4a mp4 mov avi mkv webm zip gz tgz bz2 tbz tbz2 xz 7z rar dmg iso jar war ear wasm"
+INCLUDE_PATHS=()
+EXCLUDE_PATHS=()
+CONTENT_MATCHES=()
+USE_DEFAULT_EXCLUDES=true
+DEFAULT_EXCLUDE_PATHS=(
+  "gradlew"
+  "gradlew.bat"
+  "gradle-wrapper.jar"
+  "gradle/**"
+  "*/gradle/**"
+  "*.gradle"
+  "*.gradle.kts"
+)
+
+cleanup() {
+  local file_path="${TMP_FILE:-}"
+  if [[ -n "$file_path" && -f "$file_path" ]]; then
+    rm -f "$file_path"
+  fi
+}
+
+trap cleanup EXIT
+
+# Normalize extensions: strip leading dots and lowercase.
+normalize_ext() {
+  local ext="$1"
+  ext="${ext#.}"
+  printf '%s' "$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output|-o)
+        OUTPUT_MODE="file"
+        OUTPUT_FILE="${2-}"
+        if [[ -z "$OUTPUT_FILE" ]]; then
+          echo "error: --output requires a file path" >&2
+          exit 2
+        fi
+        shift 2
+        ;;
+      --print)
+        OUTPUT_MODE="stdout"
+        shift
+        ;;
+      --include-hidden)
+        INCLUDE_HIDDEN=true
+        shift
+        ;;
+      --include-binary)
+        INCLUDE_BINARY=true
+        shift
+        ;;
+      --include-path)
+        local pattern="${2-}"
+        if [[ -z "$pattern" ]]; then
+          echo "error: --include-path requires a pattern" >&2
+          exit 2
+        fi
+        INCLUDE_PATHS+=("$pattern")
+        shift 2
+        ;;
+      --exclude-path)
+        local pattern="${2-}"
+        if [[ -z "$pattern" ]]; then
+          echo "error: --exclude-path requires a pattern" >&2
+          exit 2
+        fi
+        EXCLUDE_PATHS+=("$pattern")
+        shift 2
+        ;;
+      --match-content)
+        local needle="${2-}"
+        if [[ -z "$needle" ]]; then
+          echo "error: --match-content requires a string" >&2
+          exit 2
+        fi
+        CONTENT_MATCHES+=("$needle")
+        shift 2
+        ;;
+      --no-default-excludes)
+        USE_DEFAULT_EXCLUDES=false
+        shift
+        ;;
+      --filter|-f)
+        local value="${2-}"
+        if [[ -z "$value" ]]; then
+          echo "error: --filter requires a value" >&2
+          exit 2
+        fi
+        if [[ -n "$FILTER_MODE" ]]; then
+          echo "error: only one --filter flag is allowed" >&2
+          exit 2
+        fi
+        local prefix="${value:0:1}"
+        if [[ "$prefix" != "+" && "$prefix" != "-" ]]; then
+          echo "error: filter must start with + or -" >&2
+          exit 2
+        fi
+        [[ "$prefix" == "+" ]] && FILTER_MODE="include" || FILTER_MODE="exclude"
+        local list="${value:1}"
+        if [[ -z "$list" ]]; then
+          echo "error: filter list cannot be empty" >&2
+          exit 2
+        fi
+        IFS=',' read -r -a exts <<< "$list"
+        for ext in "${exts[@]}"; do
+          ext_normalized="$(normalize_ext "$ext")"
+          if [[ -z "$ext_normalized" ]]; then
+            echo "error: empty extension in filter" >&2
+            exit 2
+          fi
+          FILTER_EXTS+=("$ext_normalized")
+        done
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        usage
+        exit 2
+        ;;
+    esac
+  done
+}
+
+extension_matches_filter() {
+  local ext="$1"
+  if [[ ${#FILTER_EXTS[@]} -eq 0 ]]; then
+    return 0
+  fi
+  local ext_norm="$(normalize_ext "$ext")"
+  for candidate in "${FILTER_EXTS[@]}"; do
+    if [[ "$ext_norm" == "$candidate" ]]; then
+      [[ "$FILTER_MODE" == "include" ]] && return 0 || return 1
+    fi
+  done
+  [[ "$FILTER_MODE" == "include" ]] && return 1 || return 0
+}
+
+is_default_binary_extension() {
+  local ext_norm="$(normalize_ext "$1")"
+  if [[ -z "$ext_norm" ]]; then
+    return 1
+  fi
+  for candidate in $DEFAULT_BINARY_EXTS; do
+    if [[ "$ext_norm" == "$candidate" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+path_matches_filters() {
+  local rel_path="$1"
+  local matched_include=false
+  if [[ ${#INCLUDE_PATHS[@]} -gt 0 ]]; then
+    for pattern in "${INCLUDE_PATHS[@]}"; do
+      if [[ "$rel_path" == $pattern ]]; then
+        matched_include=true
+        break
+      fi
+    done
+    $matched_include || return 1
+  fi
+
+  if $matched_include; then
+    return 0
+  fi
+
+  if [[ ${#EXCLUDE_PATHS[@]} -gt 0 ]]; then
+    for pattern in "${EXCLUDE_PATHS[@]}"; do
+      if [[ "$rel_path" == $pattern ]]; then
+        return 1
+      fi
+    done
+  fi
+
+  if [[ "$USE_DEFAULT_EXCLUDES" == true ]]; then
+    for pattern in "${DEFAULT_EXCLUDE_PATHS[@]}"; do
+      if [[ "$rel_path" == $pattern ]]; then
+        return 1
+      fi
+    done
+  fi
+
+  return 0
+}
+
+content_matches_filters() {
+  local file="$1"
+  if [[ ${#CONTENT_MATCHES[@]} -eq 0 ]]; then
+    return 0
+  fi
+  for needle in "${CONTENT_MATCHES[@]}"; do
+    if ! grep -Fq --binary-files=without-match -- "$needle" "$file"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+collect_files() {
+  local repo_root="$1"
+  local output_file="$2"
+  local files_found=false
+
+  while IFS= read -r -d '' rel_path; do
+    local file="$repo_root/$rel_path"
+
+    if [[ "$INCLUDE_HIDDEN" == false ]]; then
+      case "$rel_path" in
+        .*|*/.*) continue ;;
+      esac
+    fi
+
+    if ! path_matches_filters "$rel_path"; then
+      continue
+    fi
+
+    local ext=""
+    if [[ "$rel_path" == *.* ]]; then
+      ext="${rel_path##*.}"
+    fi
+    if ! extension_matches_filter "$ext"; then
+      continue
+    fi
+
+    if [[ "$INCLUDE_BINARY" == false ]] && is_default_binary_extension "$ext"; then
+      continue
+    fi
+
+    if [[ ! -f "$file" ]]; then
+      continue
+    fi
+
+    if ! content_matches_filters "$file"; then
+      continue
+    fi
+
+    files_found=true
+    printf '===== %s =====\n' "$rel_path" >>"$output_file"
+    sed 's/^/    /' "$file" >>"$output_file"
+    printf '\n' >>"$output_file"
+  done < <(git -C "$repo_root" ls-files -z)
+
+  if [[ "$files_found" == false ]]; then
+    return 1
+  fi
+  return 0
+}
+
+main() {
+  check_git_repo
+  parse_args "$@"
+
+  local repo_root
+  repo_root="$(git rev-parse --show-toplevel)"
+
+  TMP_FILE="$(mktemp)"
+
+  if ! collect_files "$repo_root" "$TMP_FILE"; then
+    echo -e "${YELLOW}No files matched your criteria.${NO_COLOR}"
+    exit 0
+  fi
+
+  case "$OUTPUT_MODE" in
+    file)
+      mkdir -p "$(dirname "$OUTPUT_FILE")"
+      cat "$TMP_FILE" >"$OUTPUT_FILE"
+      echo -e "${GREEN}Wrote file contents to ${BOLD}$OUTPUT_FILE${NO_COLOR}"
+      ;;
+    stdout)
+      cat "$TMP_FILE"
+      ;;
+    clipboard)
+      if command -v pbcopy >/dev/null 2>&1; then
+        pbcopy <"$TMP_FILE"
+        echo -e "${GREEN}Copied file contents to clipboard.${NO_COLOR}"
+      else
+        echo -e "${YELLOW}pbcopy is unavailable; printing to stdout instead.${NO_COLOR}"
+        cat "$TMP_FILE"
+      fi
+      ;;
+  esac
+}
+
+main "$@"
