@@ -1,92 +1,140 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/git-utils"
 
 check_git_repo
 
-printf "${YELLOW}Enter the time period to consider branches as stale (e.g., 30 minutes, 2 hours, 5 days, 3 weeks, 1 year):${NO_COLOR} "
-read -r time_input
+DRY_RUN=false
+ASSUME_YES=false
+DELETE_REMOTE=false
+INCLUDE_UNMERGED=false
+time_input=""
+
+usage() {
+    cat <<'EOF'
+Usage: git clean-branches [OPTIONS] [AGE]
+
+Deletes stale local branches already merged into the remote primary branch.
+Branches checked out in any worktree, primary/current branches, rene/*, and
+poc/lodging-observability are always protected.
+
+  AGE                 e.g. "30 days", "2 weeks" (prompted when omitted)
+  --dry-run           report only
+  -y, --yes           skip the local deletion confirmation
+  --remote            also offer deletion of matching origin branches
+  --include-unmerged  include stale branches with unique commits
+  -h, --help          show help
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true ;;
+        -y|--yes) ASSUME_YES=true ;;
+        --remote) DELETE_REMOTE=true ;;
+        --include-unmerged) INCLUDE_UNMERGED=true ;;
+        -h|--help) usage; exit 0 ;;
+        *)
+            [[ -z "$time_input" ]] || { echo "error: AGE provided more than once" >&2; exit 2; }
+            time_input="$1"
+            ;;
+    esac
+    shift
+done
 
 if [[ -z "$time_input" ]]; then
-    echo -e "${RED}Error: Time input cannot be empty.${NO_COLOR}"
-    exit 1
+    printf '%bAge cutoff (for example, 30 days or 3 weeks):%b ' "$YELLOW" "$NO_COLOR"
+    read -r time_input
 fi
-
-echo -e "${GREEN}Finding branches older than \"$time_input\"...${NO_COLOR}"
+[[ -n "$time_input" ]] || { echo "error: age cannot be empty" >&2; exit 2; }
 
 convert_to_timestamp() {
-    local input="$1"
-    local number="${input//[^0-9]/}"
-    local unit="${input//[0-9 ]/}"
-
+    local input="$1" number unit
+    number="${input//[^0-9]/}"
+    unit="${input//[0-9 ]/}"
+    [[ -n "$number" ]] || return 1
     case "$unit" in
-        m|min|minutes) date -v-"${number}"M +%s ;;
+        m|min|minute|minutes) date -v-"${number}"M +%s ;;
         h|hour|hours) date -v-"${number}"H +%s ;;
         d|day|days) date -v-"${number}"d +%s ;;
         w|week|weeks) date -v-"${number}"w +%s ;;
-        M|month|months) date -v-"${number}"m +%s ;;
+        M|mo|month|months) date -v-"${number}"m +%s ;;
         y|year|years) date -v-"${number}"y +%s ;;
-        *) echo -e "${RED}Error: Invalid time format.${NO_COLOR}"; exit 1 ;;
+        *) return 1 ;;
     esac
 }
 
-stale_cutoff=$(convert_to_timestamp "$time_input") || {
-    echo -e "\n${RED}Error: Invalid time format.${NO_COLOR}"
-    echo -e "${YELLOW}Valid formats:${NO_COLOR}"
-    echo "--------------------------------"
-    echo "| Format   | Example Input      |"
-    echo "--------------------------------"
-    echo "| Minutes  | 30 min, 10 minutes |"
-    echo "| Hours    | 2 h, 5 hours       |"
-    echo "| Days     | 1 d, 3 days        |"
-    echo "| Weeks    | 2 w, 4 weeks       |"
-    echo "| Months   | 1 mo, 6 months     |"
-    echo "| Years    | 1 y, 2 years       |"
-    echo "--------------------------------"
-    exit 1
+stale_cutoff="$(convert_to_timestamp "$time_input")" \
+    || { echo "error: invalid age '$time_input'" >&2; exit 2; }
+primary="$(get_main_branch)"
+current="$(get_current_branch)"
+
+protected_branches="$primary"
+[[ -n "$current" ]] && protected_branches+=$'\n'"$current"
+while IFS= read -r branch; do
+    [[ -n "$branch" ]] && protected_branches+=$'\n'"$branch"
+done < <(git worktree list --porcelain | awk '/^branch refs\/heads\// {sub("^branch refs/heads/", ""); print}')
+if [[ -f "$(git rev-parse --git-common-dir)/info/clean-branches-protect" ]]; then
+    while IFS= read -r branch; do
+        [[ -z "$branch" || "$branch" == \#* ]] || protected_branches+=$'\n'"$branch"
+    done < "$(git rev-parse --git-common-dir)/info/clean-branches-protect"
+fi
+
+is_protected() {
+    grep -Fqx -- "$1" <<<"$protected_branches"
 }
 
-branches=($(git for-each-ref --format="%(refname:short)@%(committerdate:unix)" refs/heads/))
-
 stale_branches=()
-for branchdata in "${branches[@]}"; do
-    branch=$(echo "$branchdata" | cut -d '@' -f1)
-    last_commit_time=$(echo "$branchdata" | cut -d '@' -f2)
-
-    if [[ "$last_commit_time" -lt "$stale_cutoff" ]]; then
-        stale_branches+=("$branch")
+while IFS=$'\t' read -r branch last_commit_time; do
+    [[ "$last_commit_time" -lt "$stale_cutoff" ]] || continue
+    ! is_protected "$branch" || continue
+    [[ "$branch" != rene/* ]] || continue
+    [[ "$branch" != "poc/lodging-observability" ]] || continue
+    if ! $INCLUDE_UNMERGED && ! git merge-base --is-ancestor "$branch" "origin/$primary"; then
+        continue
     fi
-done
+    stale_branches+=("$branch")
+done < <(git for-each-ref --format='%(refname:short)%09%(committerdate:unix)' refs/heads/)
 
 if [ ${#stale_branches[@]} -eq 0 ]; then
-    echo -e "${GREEN}No stale branches found.${NO_COLOR}"
+    echo -e "${GREEN}No removable stale branches found.${NO_COLOR}"
     exit 0
 fi
 
-echo -e "${YELLOW}The following branches are stale and will be deleted:${NO_COLOR}"
+echo -e "${YELLOW}Removable branches older than \"$time_input\":${NO_COLOR}"
 for branch in "${stale_branches[@]}"; do
     echo -e "${RED} $branch ${NO_COLOR}"
 done
 
-printf "${YELLOW}Are you sure you want to delete these branches? (y/N)${NO_COLOR} "
-read -r confirm
-if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    echo -e "${GREEN}Aborted.${NO_COLOR}"
-    exit 0
+$DRY_RUN && exit 0
+
+if ! $ASSUME_YES; then
+    printf '%bDelete these local branches? (y/N)%b ' "$YELLOW" "$NO_COLOR"
+    read -r confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo -e "${GREEN}Aborted.${NO_COLOR}"
+        exit 0
+    fi
 fi
 
 for branch in "${stale_branches[@]}"; do
-    git branch -D "$branch"
+    git branch -d "$branch"
 done
 
-printf "${YELLOW}Do you want to delete remote branches as well? (y/N)${NO_COLOR} "
+if ! $DELETE_REMOTE; then
+    echo -e "${GREEN}Stale local branches removed. Remote branches were untouched.${NO_COLOR}"
+    exit 0
+fi
+
+printf '%bAlso delete matching origin branches? (y/N)%b ' "$YELLOW" "$NO_COLOR"
 read -r confirm_remote
 if [[ "$confirm_remote" == "y" || "$confirm_remote" == "Y" ]]; then
     for branch in "${stale_branches[@]}"; do
-        git push origin --delete "$branch" 2>/dev/null
+        [[ "$branch" == rene/* ]] && continue
+        git push origin --delete "$branch"
     done
-    echo -e "${GREEN}Remote branches deleted.${NO_COLOR}"
 fi
 
-echo -e "${GREEN}Stale branches removed successfully!${NO_COLOR}"
+echo -e "${GREEN}Branch cleanup complete.${NO_COLOR}"
